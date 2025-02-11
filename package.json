@@ -20,6 +20,7 @@
   "homepage": "https://github.com/NoxelS/main-post-scraper#readme",
   "dependencies": {
     "@types/mysql": "^2.15.15",
+    "axios": "^1.7.9",
     "dotenv": "^8.2.0",
     "mysql": "^2.18.1",
     "node-cron": "^2.0.3",
