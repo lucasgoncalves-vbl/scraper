@@ -1,140 +1,166 @@
 import { config } from "dotenv";
-import { createPool, Pool } from "mysql";
 import { schedule } from "node-cron";
-import Puppeteer from "puppeteer";
+import puppeteer, { Browser, Page } from "puppeteer";
 import fs from "fs";
 import path from "path";
 import axios from "axios";
 
 config();
 
-const downloadDir = "./editais";
+const DOWNLOAD_DIR = "./editais";
+
+// Configurações do ambiente
+const IS_PRODUCTION = process.env.production === "true";
+const SCRAPE_INTERVAL = IS_PRODUCTION ? "*/30 * * * *" : "*/30 * * * *";
 
 // Função para verificar se o arquivo já foi baixado
-function arquivoJaBaixado(fileName: string): boolean {
-  const filePath = path.join(downloadDir, fileName);
+function isFileAlreadyDownloaded(fileName: string): boolean {
+  const filePath = path.join(DOWNLOAD_DIR, fileName);
   return fs.existsSync(filePath);
 }
 
-/* Baixa os editais da Finep com situação atual aberta */
-async function scrapeFinep() {
-  const url = "http://www.finep.gov.br/chamadas-publicas?situacao=aberta";
-
-  const browser = await Puppeteer.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-gpu"],
-    timeout: 0,
-  });
-
-  const page = await browser.newPage();
-  await page.goto(url, { waitUntil: "load" });
-
-  const todasPaginas = await page.evaluate(() => {
-    const counter = document.querySelector("p.counter")?.textContent;
-    const total = counter?.replace(/\s/g, "").match(/\d+$/)?.[0];
-    const totalPaginas = total ? parseInt(total, 10) : 0;
-
-    const baseUrl = "http://www.finep.gov.br/chamadas-publicas?situacao=aberta&start=";
-    const href: string[] = [];
-
-    href.push("http://www.finep.gov.br/chamadas-publicas?situacao=aberta");
-
-    for (let i = 10; i <= totalPaginas * 10 - 10; i += 10) {
-      href.push(`${baseUrl}${i}`);
-    }
-
-    return {
-      totalPaginas,
-      href,
-    };
-  });
-
-  let todosLinks: { href: string; text: string }[] = [];
-
-  for (const pagina of todasPaginas.href) {
-    await page.goto(pagina, { waitUntil: "load" });
-
-    const pagesLinks = await page.evaluate(() => {
-      const links = Array.from(document.querySelectorAll("a"));
-
-      return links
-        .map((link) => ({
-          href: link.href,
-          text: link.innerText,
-        }))
-        .filter((link) => link.href.includes("chamadapublica"));
-    });
-
-    todosLinks = todosLinks.concat(pagesLinks);
+// Função para criar o diretório de download, se não existir
+function ensureDownloadDirectoryExists(): void {
+  if (!fs.existsSync(DOWNLOAD_DIR)) {
+    fs.mkdirSync(DOWNLOAD_DIR);
   }
-
-  console.log("Páginas encontradas:", todosLinks);
-
-  // Criando o diretório de download, se não existir
-  if (!fs.existsSync(downloadDir)) {
-    fs.mkdirSync(downloadDir);
-  }
-
-  let pdfLinks: { href: string; text: string }[] = [];
-
-  for (const nova of todosLinks) {
-    await page.goto(nova.href, { waitUntil: "load" });
-
-    // Extraindo os links dos editais em PDF
-    const links = await page.evaluate(() => {
-      const links = Array.from(document.querySelectorAll("a"));
-      return links
-        .map((link) => ({
-          href: link.href,
-          text: link.innerText,
-        }))
-        .filter((link) => link.href.includes("Edital") && link.href.endsWith(".pdf"));
-    });
-
-    pdfLinks = pdfLinks.concat(links);
-  }
-
-  console.log("Editais encontrados:", pdfLinks);
-
-  // Baixando os PDFs
-  for (const { href, text } of pdfLinks) {
-    const fileName = path.basename(href);
-    const filePath = path.join(downloadDir, fileName);
-
-    // Verifica se o arquivo já foi baixado
-    if (arquivoJaBaixado(fileName)) {
-      console.log(`Arquivo já baixado: ${fileName}`);
-      continue; // Pula para o próximo arquivo
-    }
-
-    try {
-      const response = await axios.get(href, { responseType: "stream" });
-      const writer = fs.createWriteStream(filePath);
-
-      response.data.pipe(writer);
-
-      await new Promise((resolve, reject) => {
-        writer.on("finish", resolve);
-        writer.on("error", reject);
-      });
-
-      console.log(`Download concluído: ${fileName}`);
-    } catch (err) {
-      console.error(`Erro ao baixar ${fileName}:`, err);
-    }
-  }
-
-  await browser.close();
 }
 
-// Agendando o scraper para rodar conforme necessário
-const interval = process.env.production ? "*/30 * * * *" : "* * * * *";
-console.log(
-  `Scraping a cada ${process.env.production ? "30 minutos" : "minuto"}.`
-);
+// Função para extrair links das páginas de editais
+async function extractPageLinks(page: Page, baseUrl: string): Promise<string[]> {
+  const totalPages = await page.evaluate(() => {
+    const counter = document.querySelector("p.counter")?.textContent;
+    const total = counter?.replace(/\s/g, "").match(/\d+$/)?.[0];
+    return total ? parseInt(total, 10) : 0;
+  });
 
-if (!process.env.production) {
+  const pageLinks: string[] = [baseUrl];
+
+  for (let i = 10; i <= totalPages * 10 - 10; i += 10) {
+    pageLinks.push(`${baseUrl}&start=${i}`);
+  }
+
+  return pageLinks;
+}
+
+// Função para extrair links de chamadas públicas
+async function extractChamadaPublicaLinks(page: Page, url: string): Promise<{ href: string; text: string }[]> {
+  await page.goto(url, { waitUntil: "networkidle2" }); // Espera até que a rede esteja ociosa
+  console.log(`Acessando página de listagem: ${url}`);
+
+  return page.evaluate(() => {
+    const links = Array.from(document.querySelectorAll("a"));
+    return links
+      .map((link) => ({
+        href: link.href,
+        text: link.innerText.trim(),
+      }))
+      .filter((link) => link.href.includes("chamadapublica"));
+  });
+}
+
+// Função para extrair links de PDFs dentro de uma página de chamada pública
+async function extractPdfLinks(page: Page, url: string): Promise<{ href: string; }[]> {
+  await page.goto(url, { waitUntil: "networkidle2" }); // Espera até que a rede esteja ociosa
+  console.log(`Acessando página de chamada pública: ${url}`);
+
+  return page.evaluate(() => {
+    const links = Array.from(document.querySelectorAll("a"));
+    return links
+      .map((link) => ({
+        href: link.href,
+      }))
+      .filter((link) => link.href.includes("Edital") && link.href.endsWith(".pdf"));
+  });
+}
+
+// Função para baixar um arquivo PDF
+async function downloadPdfFile(url: string, fileName: string): Promise<void> {
+  const filePath = path.join(DOWNLOAD_DIR, fileName);
+
+  if (isFileAlreadyDownloaded(fileName)) {
+    console.log(`Arquivo já baixado: ${fileName}`);
+    return;
+  }
+
+  try {
+    const response = await axios.get(url, { responseType: "stream" });
+    const writer = fs.createWriteStream(filePath);
+
+    response.data.pipe(writer);
+
+    await new Promise((resolve, reject) => {
+      writer.on("finish", resolve);
+      writer.on("error", reject);
+    });
+
+    console.log(`Download concluído: ${fileName}`);
+  } catch (err) {
+    console.error(`Erro ao baixar ${fileName}:`, err);
+  }
+}
+
+// Função principal para realizar o scraping
+async function scrapeFinep(): Promise<void> {
+  const baseUrl = "http://www.finep.gov.br/chamadas-publicas?situacao=aberta";
+
+  let browser: Browser | null = null;
+
+  try {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-gpu"],
+      timeout: 0,
+    });
+
+    const page = await browser.newPage();
+    await page.goto(baseUrl, { waitUntil: "networkidle2" });
+
+    // Passo 1: Extrair links de todas as páginas de listagem (&start=10, &start=20, etc.)
+    const pageLinks = await extractPageLinks(page, baseUrl);
+    console.log("Páginas de listagem encontradas:", pageLinks);
+
+    // Passo 2: Extrair links de chamadas públicas em cada página de listagem
+    const allChamadaPublicaLinks: { href: string; text: string }[] = [];
+
+    for (const pageLink of pageLinks) {
+      const chamadaPublicaLinks = await extractChamadaPublicaLinks(page, pageLink);
+      allChamadaPublicaLinks.push(...chamadaPublicaLinks);
+    }
+
+    console.log("Links de chamadas públicas encontrados:", allChamadaPublicaLinks);
+
+    // Passo 3: Extrair links de PDFs em cada página de chamada pública
+    const allPdfLinks: { href: string; text: string }[] = [];
+
+    for (const { href } of allChamadaPublicaLinks) {
+      const pdfLinks = await extractPdfLinks(page, href);
+      allPdfLinks.push(...pdfLinks);
+    }
+
+    console.log("Links de PDFs encontrados:", allPdfLinks);
+
+    // Passo 4: Baixar os PDFs
+    ensureDownloadDirectoryExists();
+
+    for (const { href, text } of allPdfLinks) {
+      const fileName = path.basename(href);
+      await downloadPdfFile(href, fileName);
+    }
+  } catch (err) {
+    console.error("Erro durante o scraping:", err);
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+  }
+}
+
+// Agendando o scraping
+console.log(`Scraping a cada ${IS_PRODUCTION ? "30 minutos" : "minuto"}.`);
+
+if (!IS_PRODUCTION) {
   scrapeFinep();
 }
 
-schedule(interval, () => scrapeFinep());
+schedule(SCRAPE_INTERVAL, () => scrapeFinep());
