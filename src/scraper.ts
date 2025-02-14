@@ -60,18 +60,23 @@ async function extractChamadaPublicaLinks(page: Page, url: string): Promise<{ hr
 }
 
 // Função para extrair links de PDFs dentro de uma página de chamada pública
-async function extractPdfLinks(page: Page, url: string): Promise<{ href: string; }[]> {
+async function extractPdfLinks(page: Page, url: string): Promise<{ href: string, numeroChamada:string; }[]> {
   await page.goto(url, { waitUntil: "networkidle2" }); // Espera até que a rede esteja ociosa
   console.log(`Acessando página de chamada pública: ${url}`);
 
-  return page.evaluate(() => {
+  return page.evaluate((currentUrl) => {
     const links = Array.from(document.querySelectorAll("a"));
+
+    const match = currentUrl.match(/\/(\d+)$/);
+    const numeroChamada = match ? match[1] : "";
+
     return links
       .map((link) => ({
         href: link.href,
+        numeroChamada
       }))
       .filter((link) => (link.href.includes("Edital") || link.href.includes("Final") ) && link.href.endsWith(".pdf"));
-  });
+  },url);
 }
 
 // Função para baixar um arquivo PDF
@@ -133,7 +138,7 @@ async function scrapeFinep(situacao:string): Promise<void> {
     console.log("Links de chamadas públicas abertas encontrados:", allChamadaPublicaLinks.length);
 
     // Passo 3: Extrair links de PDFs em cada página de chamada pública
-    const allPdfLinks: { href: string; }[] = [];
+    const allPdfLinks: { href: string; numeroChamada:string }[] = [];
 
     for (const { href } of allChamadaPublicaLinks) {
       const pdfLinks = await extractPdfLinks(page, href);
@@ -145,8 +150,8 @@ async function scrapeFinep(situacao:string): Promise<void> {
     // Passo 4: Baixar os PDFs
     ensureDownloadDirectoryExists();
 
-    for (const { href } of allPdfLinks) {
-      const fileName = path.basename(href);
+    for (const { href, numeroChamada } of allPdfLinks) {
+      const fileName = path.basename(href + "-" + numeroChamada);
       await downloadPdfFile(href, fileName);
     }
   } catch (err) {
