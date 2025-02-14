@@ -70,7 +70,7 @@ async function extractPdfLinks(page: Page, url: string): Promise<{ href: string;
       .map((link) => ({
         href: link.href,
       }))
-      .filter((link) => link.href.includes("Edital") && link.href.endsWith(".pdf"));
+      .filter((link) => (link.href.includes("Edital") || link.href.includes("Final") ) && link.href.endsWith(".pdf"));
   });
 }
 
@@ -101,8 +101,10 @@ async function downloadPdfFile(url: string, fileName: string): Promise<void> {
 }
 
 // Função principal para realizar o scraping
-async function scrapeFinep(): Promise<void> {
-  const baseUrl = "http://www.finep.gov.br/chamadas-publicas?situacao=aberta";
+async function scrapeFinep(situacao:string): Promise<void> {
+  const baseUrl = `http://www.finep.gov.br/chamadas-publicas?situacao=${situacao}`;
+
+  console.log(`Scrape finep - Situacao=${situacao}`)
 
   let browser: Browser | null = null;
 
@@ -128,10 +130,10 @@ async function scrapeFinep(): Promise<void> {
       allChamadaPublicaLinks.push(...chamadaPublicaLinks);
     }
 
-    console.log("Links de chamadas públicas encontrados:", allChamadaPublicaLinks);
+    console.log("Links de chamadas públicas abertas encontrados:", allChamadaPublicaLinks.length);
 
     // Passo 3: Extrair links de PDFs em cada página de chamada pública
-    const allPdfLinks: { href: string; text: string }[] = [];
+    const allPdfLinks: { href: string; }[] = [];
 
     for (const { href } of allChamadaPublicaLinks) {
       const pdfLinks = await extractPdfLinks(page, href);
@@ -143,7 +145,7 @@ async function scrapeFinep(): Promise<void> {
     // Passo 4: Baixar os PDFs
     ensureDownloadDirectoryExists();
 
-    for (const { href, text } of allPdfLinks) {
+    for (const { href } of allPdfLinks) {
       const fileName = path.basename(href);
       await downloadPdfFile(href, fileName);
     }
@@ -159,8 +161,15 @@ async function scrapeFinep(): Promise<void> {
 // Agendando o scraping
 console.log(`Scraping a cada ${IS_PRODUCTION ? "30 minutos" : "minuto"}.`);
 
-if (!IS_PRODUCTION) {
-  scrapeFinep();
-}
 
-schedule(SCRAPE_INTERVAL, () => scrapeFinep());
+scrapeFinep("aberta")
+  .then(() => {
+    console.log("Scrape de editais abertos da finep encerrado. Iniciando scrape de editais encerrados.");
+    return scrapeFinep("encerrada"); // Retorna a próxima promessa
+  })
+  .then(() => {
+    console.log("Scrape de editais encerrados da finep encerrado.");
+  })
+  .catch((err) => {
+    console.error("Erro durante o scraping:", err);
+  });
