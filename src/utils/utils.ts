@@ -9,7 +9,6 @@ export function isFileAlreadyDownloaded(fileName: string, downloadDir: string): 
 }
 
 export function ensureDownloadDirectoryExists(downloadDir: string): void {
-    console.log("Uepaaa")
   if (!fs.existsSync(downloadDir)) {
     fs.mkdirSync(downloadDir, { recursive: true });
   }
